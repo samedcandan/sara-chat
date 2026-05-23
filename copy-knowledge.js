@@ -57,9 +57,12 @@ async function copy() {
 
   for (const file of knowledgeFiles) {
     await sql`
+      DELETE FROM chat_knowledge_files 
+      WHERE tenant_id = ${CHAT_TENANT_ID} AND file_type = ${file.file_type}
+    `;
+    await sql`
       INSERT INTO chat_knowledge_files (tenant_id, file_type, content)
       VALUES (${CHAT_TENANT_ID}, ${file.file_type}, ${file.content})
-      ON CONFLICT (tenant_id, file_type) DO UPDATE SET content = EXCLUDED.content
     `;
     console.log(`✅ ${file.file_type}: ${file.content.length} karakter kopyalandı`);
   }
