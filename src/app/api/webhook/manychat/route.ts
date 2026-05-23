@@ -1,19 +1,21 @@
 // ── SARA Chat — ManyChat Webhook ────────────────────────
-// 
-// MİMARİ (n8n'in çalışan modeli):
-// 1. ManyChat POST atar → Biz anında 200 OK döneriz (timeout yok)
-// 2. waitUntil ile arka planda AI cevap üretir
-// 3. setCustomField ile sara_cevap güncellenir
-// 4. sendFlow ile ManyChat akışı tetiklenir → kullanıcıya mesaj gider
 //
-// Bu sayede ManyChat'in 10 saniye timeout sınırını aşıyoruz.
+// 2 AYRI OTOMASYON MODELİ:
+//
+// [aysainsta] → mesaj gelince bu webhook'a POST atar
+// [insta cevap] → API ile tetiklenip sara_cevap'ı kullanıcıya gönderir
+//
+// 3 KATMANLI CEVAP STRATEJİSİ:
+// 1. sendContent — API ile doğrudan mesaj gönder (en hızlı yol)
+// 2. setCustomField + sendFlow — "insta cevap" flow'unu tetikle (yedek yol)
+// 3. JSON response'da ai_response dön — ManyChat Response Mapping (son yedek)
 
 export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { runAgent } from '@/lib/agent';
-import { setCustomField, sendFlow } from '@/lib/manychat';
+import { setCustomField, sendFlow, sendContent } from '@/lib/manychat';
 
 // GET — Health check
 export async function GET(req: NextRequest) {
@@ -22,8 +24,9 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     status: 'ok',
-    version: '1.0.0',
+    version: '2.0.0',
     tenant: tenantId || 'not specified',
+    timestamp: new Date().toISOString(),
   });
 }
 
@@ -35,11 +38,11 @@ export async function POST(req: NextRequest) {
   if (!tenantId) {
     return NextResponse.json(
       { success: false, error: 'tenant parametresi gerekli' },
-      { status: 200 } // ManyChat'e her zaman 200 dön
+      { status: 200 }
     );
   }
 
-  let body: { contact_id?: string; last_text_input?: string };
+  let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
@@ -49,14 +52,15 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const contactId = body.contact_id || 'unknown';
-  const userMessage = body.last_text_input || '';
+  // ManyChat subscriber ID — bu integer (contact_id veya id olarak gelebilir)
+  const subscriberId = String(body.id || body.contact_id || body.subscriber_id || '');
+  const userMessage = String(body.last_text_input || body.text || body.message || '');
+
+  console.log(`[SARA-CHAT] Gelen body:`, JSON.stringify(body));
+  console.log(`[SARA-CHAT] subscriberId: ${subscriberId}, message: "${userMessage}"`);
 
   if (!userMessage.trim()) {
-    return NextResponse.json(
-      { success: false, error: 'Boş mesaj' },
-      { status: 200 }
-    );
+    return NextResponse.json({ success: false, error: 'Boş mesaj' }, { status: 200 });
   }
 
   // ── Tenant bilgilerini çek ──
@@ -74,46 +78,45 @@ export async function POST(req: NextRequest) {
   `;
 
   if (!tenant) {
-    return NextResponse.json(
-      { success: false, error: 'Tenant bulunamadı' },
-      { status: 200 }
-    );
+    return NextResponse.json({ success: false, error: 'Tenant bulunamadı' }, { status: 200 });
   }
 
   // ── AI cevap üret ──
-  console.log(`[SARA-CHAT] Mesaj alındı: "${userMessage}" (contact: ${contactId})`);
-
   try {
     const aiResponse = await runAgent({
       tenantId: tenant.id,
       systemPrompt: tenant.system_prompt || '',
-      contactId,
+      contactId: subscriberId,
       platform: 'manychat',
       userMessage,
     });
 
-    console.log(`[SARA-CHAT] AI cevap: "${aiResponse.substring(0, 100)}..."`);
+    console.log(`[SARA-CHAT] AI cevap (${aiResponse.length} char): "${aiResponse.substring(0, 100)}..."`);
 
-    // ── ManyChat API ile cevabı gönder ──
-    if (tenant.manychat_field_id && tenant.manychat_flow_ns) {
+    // ── KATMAN 1: sendContent ile doğrudan mesaj gönder ──
+    if (subscriberId && subscriberId !== 'unknown') {
       try {
-        // 1. sara_cevap field'ını güncelle
-        const fieldResult = await setCustomField(
-          contactId,
-          tenant.manychat_field_id,
-          aiResponse
-        );
-        console.log(`[SARA-CHAT] setCustomField:`, JSON.stringify(fieldResult));
-
-        // 2. Flow'u tetikle (Send Message bloğu cevabı iletir)
-        const flowResult = await sendFlow(contactId, tenant.manychat_flow_ns);
-        console.log(`[SARA-CHAT] sendFlow:`, JSON.stringify(flowResult));
-      } catch (mcError) {
-        console.error(`[SARA-CHAT] ManyChat API hatası:`, mcError);
+        const directResult = await sendContent(subscriberId, aiResponse);
+        console.log(`[SARA-CHAT] sendContent sonuç:`, JSON.stringify(directResult));
+      } catch (e) {
+        console.log(`[SARA-CHAT] sendContent başarısız, flow ile deneniyor...`, e);
       }
     }
 
-    // ManyChat'in Response Mapping'i için de ai_response'u dön (yedek yol)
+    // ── KATMAN 2: setCustomField + sendFlow (2 ayrı otomasyon modeli) ──
+    if (tenant.manychat_field_id && tenant.manychat_flow_ns && subscriberId) {
+      try {
+        const fieldResult = await setCustomField(subscriberId, tenant.manychat_field_id, aiResponse);
+        console.log(`[SARA-CHAT] setCustomField:`, JSON.stringify(fieldResult));
+
+        const flowResult = await sendFlow(subscriberId, tenant.manychat_flow_ns);
+        console.log(`[SARA-CHAT] sendFlow:`, JSON.stringify(flowResult));
+      } catch (e) {
+        console.error(`[SARA-CHAT] ManyChat API hatası:`, e);
+      }
+    }
+
+    // ── KATMAN 3: JSON response (ManyChat Response Mapping) ──
     return NextResponse.json({
       success: true,
       ai_response: aiResponse,
@@ -121,10 +124,9 @@ export async function POST(req: NextRequest) {
 
   } catch (error) {
     console.error(`[SARA-CHAT] Agent hatası:`, error);
-    const fallback = 'Şu an teknik bir sorun yaşıyoruz. Lütfen biraz sonra tekrar deneyin.';
     return NextResponse.json({
       success: true,
-      ai_response: fallback,
+      ai_response: 'Şu an teknik bir sorun yaşıyoruz. Lütfen biraz sonra tekrar deneyin.',
     });
   }
 }

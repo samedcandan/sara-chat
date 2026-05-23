@@ -1,5 +1,6 @@
 // ── ManyChat API Yardımcıları ────────────────────────────
-// n8n'in eski workflow'undaki setCustomField + sendFlow mantığının aynısı.
+// Tüm ManyChat işlemlerini API üzerinden yapıyoruz.
+// Otomasyonların aktif/pasif olmasına bağımlı DEĞİLİZ.
 
 const MANYCHAT_API = 'https://api.manychat.com/fb';
 
@@ -16,6 +17,18 @@ async function mcFetch(endpoint: string, body: Record<string, unknown>) {
     },
     body: JSON.stringify(body),
   });
+  const data = await res.json();
+  return data;
+}
+
+async function mcGet(endpoint: string) {
+  const res = await fetch(`${MANYCHAT_API}${endpoint}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+  });
   return res.json();
 }
 
@@ -24,28 +37,29 @@ async function mcFetch(endpoint: string, body: Record<string, unknown>) {
  */
 export async function setCustomField(subscriberId: string, fieldId: number, value: string) {
   return mcFetch('/subscriber/setCustomField', {
-    subscriber_id: subscriberId,
+    subscriber_id: Number(subscriberId),
     field_id: fieldId,
     field_value: value,
   });
 }
 
 /**
- * Belirli bir flow'u tetikle (Send Message bloğu içeren)
+ * Belirli bir flow'u tetikle — "insta cevap" otomasyonunu çalıştırır
  */
 export async function sendFlow(subscriberId: string, flowNs: string) {
   return mcFetch('/sending/sendFlow', {
-    subscriber_id: subscriberId,
+    subscriber_id: Number(subscriberId),
     flow_ns: flowNs,
   });
 }
 
 /**
- * Doğrudan mesaj gönderme (24 saat penceresi açıksa çalışır)
+ * Doğrudan mesaj gönder — 24 saat penceresi açıksa çalışır
+ * Otomasyon gerektirmez, API ile direkt gönderir
  */
 export async function sendContent(subscriberId: string, text: string) {
   return mcFetch('/sending/sendContent', {
-    subscriber_id: subscriberId,
+    subscriber_id: Number(subscriberId),
     data: {
       version: 'v2',
       content: {
@@ -53,4 +67,18 @@ export async function sendContent(subscriberId: string, text: string) {
       },
     },
   });
+}
+
+/**
+ * Subscriber bilgilerini al
+ */
+export async function getSubscriberInfo(subscriberId: string) {
+  return mcGet(`/subscriber/getInfo?subscriber_id=${subscriberId}`);
+}
+
+/**
+ * Sayfa bilgilerini al
+ */
+export async function getPageInfo() {
+  return mcGet('/page/getInfo');
 }
